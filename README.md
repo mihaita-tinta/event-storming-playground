@@ -21,11 +21,14 @@
 - Challenges (distributed monolith, IPC challenges, transactions, queries, automation, rollout plan, when)
 
 
-## Big Picture Event Storming
+## Big Picture Event Storming - Events Organiser Startup
 
-## Design Level Event Storming
+We are part of a new startup and we need to implement an Events Organiser System allowing participants to join events created by our users.
+We run a Big Picture Event Storming workshop to discover the business domain.
 
 ## Coding
+
+Based on our previous discoveries, we are required to implement a Prototype to validate our model.
 
 We start from a simple skeleton using the lastest Spring Boot version. Click [here](https://start.spring.io/starter.zip?type=maven-project&language=java&bootVersion=3.0.1&baseDir=api&groupId=playground&artifactId=api&name=api&description=Demo%20project%20for%20Spring%20Boot&packageName=playground.api&packaging=jar&javaVersion=17&dependencies=web,data-jpa,mysql,security,validation,restdocs,kafka,actuator) to download the zip.
 
