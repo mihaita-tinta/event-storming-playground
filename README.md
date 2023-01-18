@@ -1,14 +1,19 @@
 # event-storming-playground
 
+Agenda:
+- Microservices introduction
+- Big Picture Event Storming - Events Organiser Startup
+- Coding
+
 ## Microservices introduction
 
 - What kind of applications do we write?
 - Typical Java enterprise architecture.
 - Symptoms
-    - Delivery is slow (code changes, e2e)
-    - Codebase difficult to maintain (slow tests, coordinated changes)
-    - Application difficult to scale (hardware constraints)
-    - Wasted developer time (meetings, bugs, huge classes, shared libraries)
+  - Delivery is slow (code changes, e2e)
+  - Codebase difficult to maintain (slow tests, coordinated changes)
+  - Application difficult to scale (hardware constraints)
+  - Wasted developer time (meetings, bugs, huge classes, shared libraries)
 - Monolithic hell
 - Example of architecture of a monolith
 - Advantages (easy to develop, radical changes, test, deploy, scale)
@@ -320,6 +325,27 @@ public class UserController {
     }
 }
 ```
+Test
+```java
+@WebMvcTest
+@AutoConfigureMockMvc
+@Import(UsersMock.class)
+class MyUserResourceTest {
+
+    @Autowired
+    MockMvc mockMvc;
+
+    @Test
+    @WithUserDetails(userDetailsServiceBeanName = "myUserDetailsService")
+    public void test() throws Exception {
+
+        mockMvc.perform(get("/api/users/whoami"))
+                .andDo(print())
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.username").value("user"));
+    }
+}
+```
 
 ### Publish events
 
@@ -568,3 +594,237 @@ Run `mvn clean install`.
 Check `com.mih.training.invoice.events.InvoiceEvent` was generated.
 
 Update publisher and consumer with the new payload type.
+
+## Calling another service
+
+Enable Spring Cloud
+```xml
+...
+<spring-cloud.version>2022.0.0-RC2</spring-cloud.version>
+...
+`    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>org.springframework.cloud</groupId>
+                <artifactId>spring-cloud-dependencies</artifactId>
+                <version>${spring-cloud.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+```
+
+Let's consume the endpoints described by this interface.
+
+Add `spring-cloud-starter-contract-stub-runner`
+```xml
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-contract-stub-runner</artifactId>
+            <scope>test</scope>
+        </dependency>
+```
+Http clients: RestTemplate, WebClient, HttpClient, OkHttp, Finagle etc
+
+Add `Finagle`
+
+```xml
+        <dependency>
+            <groupId>com.twitter</groupId>
+            <artifactId>finagle-core_2.13</artifactId>
+            <version>20.4.0</version>
+        </dependency>
+        <dependency>
+            <groupId>com.twitter</groupId>
+            <artifactId>finagle-http_2.13</artifactId>
+            <version>20.4.0</version>
+        </dependency>
+```
+
+Configure Finagle to call the remote service:
+
+```java
+@Configuration
+public class FinagleConfig {
+  private static final Logger log = LoggerFactory.getLogger(FinagleConfig.class);
+
+  @Bean
+  public Service<Request, Response> httpClient(@Value("${wiremock.server.port:8080}") int port,
+                                               @Value("${global-timeout:5000}") int globalTimeout,
+                                               @Value("${request-timeout:1000}") int requestTimeout) {
+
+    Duration timeoutDuration = Duration.fromMilliseconds(globalTimeout);
+    final TimeoutFilter<Request, Response> timeoutFilter = new TimeoutFilter<>(
+            timeoutDuration,
+            new GlobalRequestTimeoutException(timeoutDuration),
+            DefaultTimer.getInstance()
+    );
+
+    Stream<Duration> backoff = Backoff.exponentialJittered(Duration.fromMilliseconds(100), Duration.fromMilliseconds(30_000));
+    RetryExceptionsFilter<Request, Response> rt = new RetryExceptionsFilter<>(
+            RetryPolicy.backoffJava(Backoff
+                            .toJava(backoff),
+                    RetryPolicy.TimeoutAndWriteExceptionsOnly()), HighResTimer.Default(), NullStatsReceiver.get());
+
+    RetryBudget budget = RetryBudgets.newRetryBudget(Duration.fromMilliseconds(1000), 10, 1);
+    Http.Client client = Http.client()
+            .withRetryBudget(budget)
+            .withRetryBackoff(backoff)
+            .withRequestTimeout(Duration.fromMilliseconds(requestTimeout));
+
+    return new LogFilter()
+            .andThen(timeoutFilter)
+            .andThen(rt)
+            .andThen(client.newService(":" + port));
+
+  }
+}
+```
+
+Deserialize everything into an `Account`:
+```java
+public record Account(String id, String name) {
+}
+```
+
+Create a service `AccountService` to get the accounts
+```java
+
+@Component
+public class AccountService {
+    private static final Logger log = LoggerFactory.getLogger(AccountService.class);
+    private final Service<Request, Response> httpClient;
+    private final ObjectMapper mapper;
+
+    public AccountService(Service<Request, Response> httpClient, ObjectMapper mapper) {
+        this.httpClient = httpClient;
+        this.mapper = mapper;
+    }
+
+    public CompletableFuture<List<Account>> getAccounts() {
+
+        Request request = Request.apply(Method.Get(), "/v2/accounts");
+        request.host("localhost");
+        Future<Response> response = httpClient.apply(request);
+
+        return response.toCompletableFuture()
+                .thenCompose(r -> {
+                    Response res = (Response) r;
+                    log.debug("getAccounts - received: {}, body: {}", res, res.contentString());
+                    if (res.status() != Status.Ok()) {
+                        return CompletableFuture.failedFuture(new IllegalStateException("could not get account"));
+                    }
+                    try {
+                        List<Account> accounts = mapper.readValue(res.contentString(), new TypeReference<>() {});
+                        return CompletableFuture.completedFuture(accounts);
+                    } catch (JsonProcessingException e) {
+                        log.error("getAccounts - error deserializing response", e);
+                        return CompletableFuture.failedFuture(e);
+                    }
+                });
+    }
+}
+```
+
+Add mocks to `src/main/resources/mappings/accounts.json`
+```json
+{
+  "request": {
+    "method": "GET",
+    "url": "/v2/accounts"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "Content-Type": "application/json",
+      "Cache-Control": "no-cache"
+    },
+    "fixedDelayMilliseconds": 500,
+    "bodyFileName": "accounts.json"
+  }
+}
+```
+Add to `src/main/resources/__files/accounts.json`
+```json
+[
+  {
+    "id": "123",
+    "name": "Account name 12312312"
+  }
+]
+```
+In a similar way, to the same for `Balance`:
+```json
+{
+  "request": {
+    "method": "GET",
+    "url": "/v2/accounts/123/balance"
+  },
+  "response": {
+    "status": 200,
+    "delayDistribution": {
+      "type": "lognormal",
+      "median": 1000,
+      "sigma": 0.4
+    },
+    "headers": {
+      "Content-Type": "application/json",
+      "Cache-Control": "no-cache"
+    },
+    "bodyFileName": "balance.json"
+  }
+}
+
+```
+With content `balance.json`:
+```json
+{
+  "currency": "EUR",
+  "value": 99.99
+}
+
+```
+
+And the same for transactions:
+```json
+[
+  {
+    "id": "id-12345",
+    "name": "Transaction 123r5432",
+    "value": 5.99
+  },
+  {
+    "id": "id-565556",
+    "name": "Transaction name 12312312",
+    "value": 11.10
+  },
+  {
+    "id": "id-43543534",
+    "name": "Transaction name 12312312",
+    "value": 23.99
+  }
+]
+
+```
+
+Write the first test:
+
+```java
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.DEFINED_PORT)
+@AutoConfigureMockMvc
+@AutoConfigureWireMock(port = 0)
+class AccountServiceTest {
+
+    @Autowired
+    AccountService service;
+
+    @Test
+    public void test() throws ExecutionException, InterruptedException {
+        assertNotNull(service.getAccounts()
+                .get());
+
+    }
+
+}
+```
